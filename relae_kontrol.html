@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Relæ Kontrol</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    :root {
+      --active:        #22c55e;
+      --inactive:      #ef4444;
+      --active-press:  #16a34a;
+      --inactive-press:#dc2626;
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+      background: #111;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      gap: 4px;
+      padding: 4px;
+    }
+
+    /* ── Øverste statuslinje ── */
+    #topbar {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px 4px;
+      color: rgba(255,255,255,0.55);
+      font-size: 0.82rem;
+    }
+
+    #conn-dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: #555;
+      display: inline-block;
+      margin-right: 6px;
+      transition: background 0.3s;
+    }
+    #conn-dot.connected    { background: #22c55e; }
+    #conn-dot.disconnected { background: #ef4444; }
+    #conn-dot.scanning     { background: #facc15; }
+
+    /* ── Knapper ── */
+    .relay-btn {
+      flex: 1;
+      border: none;
+      border-radius: 14px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      transition: background-color 0.12s ease, transform 0.08s ease;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+    }
+
+    .relay-btn.inactive { background-color: var(--inactive); }
+    .relay-btn.active   { background-color: var(--active); }
+    .relay-btn.inactive:active { background-color: var(--inactive-press); transform: scale(0.97); }
+    .relay-btn.active:active   { background-color: var(--active-press);   transform: scale(0.97); }
+    .relay-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .btn-icon   { font-size: clamp(2.2rem, 8vw, 3.5rem); line-height: 1; }
+    .btn-label  { color: #fff; font-size: clamp(1.5rem, 5.5vw, 2.4rem); font-weight: 700; letter-spacing: -0.02em; }
+    .btn-status { color: rgba(255,255,255,0.85); font-size: clamp(1rem, 3.5vw, 1.5rem); font-weight: 500; }
+
+    /* ── Forbind-knap (vises når ikke forbundet) ── */
+    #connect-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      backdrop-filter: blur(4px);
+    }
+    #connect-overlay.hidden { display: none; }
+
+    #connect-btn {
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 16px;
+      padding: 18px 40px;
+      font-size: 1.3rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    #connect-btn span { font-size: 0.95rem; opacity: 0.75; font-weight: 400; }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <div id="topbar">
+    <div><span id="conn-dot" class="disconnected"></span><span id="conn-label">Ikke forbundet</span></div>
+    <div id="device-name"></div>
+  </div>
+
+  <button class="relay-btn inactive" id="btn1" disabled onclick="toggle(1)">
+    <div class="btn-icon">⚡</div>
+    <div class="btn-label">Relæ 1</div>
+    <div class="btn-status" id="status1">INAKTIV</div>
+  </button>
+
+  <button class="relay-btn inactive" id="btn2" disabled onclick="toggle(2)">
+    <div class="btn-icon">⚡</div>
+    <div class="btn-label">Relæ 2</div>
+    <div class="btn-status" id="status2">INAKTIV</div>
+  </button>
+</div>
+
+<!-- Overlay med forbind-knap -->
+<div id="connect-overlay">
+  <button id="connect-btn" onclick="connectBLE()">
+    Forbind til RelæKontrol
+    <span>Tryk for at søge efter ESP32</span>
+  </button>
+</div>
+
+<script>
+  // ── UUID'er — skal matche firmware ──────────────────────────
+  const SERVICE_UUID   = '12345678-1234-1234-1234-123456789abc';
+  const CHAR_CTRL_UUID = '12345678-1234-1234-1234-123456789ab1';
+  const CHAR_STAT_UUID = '12345678-1234-1234-1234-123456789ab2';
+  // ────────────────────────────────────────────────────────────
+
+  let bleDevice = null;
+  let ctrlChar  = null;
+
+  const overlay    = document.getElementById('connect-overlay');
+  const connDot    = document.getElementById('conn-dot');
+  const connLabel  = document.getElementById('conn-label');
+  const devName    = document.getElementById('device-name');
+  const btn1       = document.getElementById('btn1');
+  const btn2       = document.getElementById('btn2');
+
+  function setConnected(connected, name = '') {
+    connDot.className   = connected ? 'connected' : 'disconnected';
+    connLabel.textContent = connected ? 'Forbundet' : 'Ikke forbundet';
+    devName.textContent   = name;
+    overlay.className   = connected ? 'hidden' : '';
+    btn1.disabled = btn2.disabled = !connected;
+  }
+
+  function updateButton(num, active) {
+    const btn    = document.getElementById('btn'    + num);
+    const status = document.getElementById('status' + num);
+    btn.className       = 'relay-btn ' + (active ? 'active' : 'inactive');
+    status.textContent  = active ? 'AKTIV' : 'INAKTIV';
+  }
+
+  async function connectBLE() {
+    if (!navigator.bluetooth) {
+      alert('Web Bluetooth understøttes ikke i denne browser.\nBrug Safari 16+ på iPhone.');
+      return;
+    }
+    try {
+      connDot.className = 'scanning';
+      connLabel.textContent = 'Søger…';
+
+      bleDevice = await navigator.bluetooth.requestDevice({
+        filters: [{ name: 'RelaeKontrol' }],
+        optionalServices: [SERVICE_UUID]
+      });
+
+      bleDevice.addEventListener('gattserverdisconnected', () => {
+        setConnected(false);
+        ctrlChar = null;
+      });
+
+      const server  = await bleDevice.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+
+      ctrlChar = await service.getCharacteristic(CHAR_CTRL_UUID);
+
+      const statChar = await service.getCharacteristic(CHAR_STAT_UUID);
+      await statChar.startNotifications();
+      statChar.addEventListener('characteristicvaluechanged', onStatus);
+
+      // Læs nuværende status ved opstart
+      const initVal = await statChar.readValue();
+      applyStatus(initVal);
+
+      setConnected(true, bleDevice.name);
+    } catch(e) {
+      connDot.className = 'disconnected';
+      connLabel.textContent = 'Ikke forbundet';
+      console.error(e);
+    }
+  }
+
+  function onStatus(evt) {
+    applyStatus(evt.target.value);
+  }
+
+  function applyStatus(dataView) {
+    const byte = dataView.getUint8(0);
+    updateButton(1, !!(byte & 0x01));
+    updateButton(2, !!(byte & 0x02));
+  }
+
+  async function toggle(num) {
+    if (!ctrlChar) return;
+    try {
+      const byte = new Uint8Array([num === 1 ? 0x01 : 0x02]);
+      await ctrlChar.writeValueWithoutResponse(byte);
+    } catch(e) {
+      console.error('Skrivefejl:', e);
+    }
+  }
+</script>
+</body>
+</html>
